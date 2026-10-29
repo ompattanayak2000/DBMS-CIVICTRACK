@@ -1,0 +1,89 @@
+
+import { NextResponse } from "next/server";
+import bcrypt from "bcryptjs";
+import { z } from "zod";
+import { postgresPool } from "@/lib/postgres";
+import { createSession } from "@/lib/auth";
+
+const loginSchema = z.object({
+  email: z.string().trim().email().max(255),
+  password: z.string().min(1).max(72),
+});
+
+export async function POST(request: Request) {
+  try {
+    const body: unknown = await request.json();
+    const validation = loginSchema.safeParse(body);
+
+    if (!validation.success) {
+      return NextResponse.json(
+        { success: false, message: "Enter a valid email and password." },
+        { status: 400 }
+      );
+    }
+
+    const { email, password } = validation.data;
+
+    const result = await postgresPool.query(
+      `SELECT user_id, full_name, email, password_hash, role_id
+       FROM users
+       WHERE email = $1`,
+      [email.toLowerCase()]
+    );
+
+    if (result.rows.length === 0) {
+      return NextResponse.json(
+        { success: false, message: "Invalid email or password." },
+        { status: 401 }
+      );
+    }
+
+    const user = result.rows[0];
+
+    const passwordMatches = await bcrypt.compare(
+      password,
+      user.password_hash
+    );
+
+    if (!passwordMatches) {
+      return NextResponse.json(
+        { success: false, message: "Invalid email or password." },
+        { status: 401 }
+      );
+    }
+
+    const token = await createSession({
+      user_id: user.user_id,
+      email: user.email,
+      role_id: user.role_id,
+    });
+
+    const response = NextResponse.json({
+      success: true,
+      message: "Login successful.",
+      user: {
+        user_id: user.user_id,
+        full_name: user.full_name,
+        email: user.email,
+        role_id: user.role_id,
+      },
+    });
+
+    response.cookies.set("civictrack_session", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: 60 * 60 * 24 * 7,
+    });
+
+    return response;
+  } catch (error) {
+    console.error("Login failed:", error);
+
+    return NextResponse.json(
+      { success: false, message: "Unable to log in right now." },
+      { status: 500 }
+    );
+  }
+}
