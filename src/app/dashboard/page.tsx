@@ -1,3 +1,5 @@
+
+import { Suspense } from "react";
 import { redirect } from "next/navigation";
 import { cookies } from "next/headers";
 import { verifySession } from "@/lib/auth";
@@ -5,7 +7,7 @@ import { postgresPool } from "@/lib/postgres";
 import Link from "next/link";
 import LogoutButton from "../../components/LogoutButton";
 
-export default async function DashboardPage() {
+async function DashboardContent() {
   const cookieStore = await cookies();
   const token = cookieStore.get("civictrack_session")?.value;
 
@@ -20,7 +22,7 @@ export default async function DashboardPage() {
   }
 
   const result = await postgresPool.query(
-    `SELECT full_name, email
+    `SELECT full_name, email, role_id
      FROM users
      WHERE user_id = $1`,
     [session.user_id]
@@ -32,6 +34,16 @@ export default async function DashboardPage() {
 
   const user = result.rows[0];
 
+  // Redirect users according to their roles
+  if (Number(user.role_id) === 2) {
+    redirect("/admin");
+  }
+
+  if (Number(user.role_id) === 3) {
+    redirect("/staff");
+  }
+
+  // Citizen Dashboard
   return (
     <main className="min-h-screen bg-gray-50 text-gray-900">
       <nav className="flex items-center justify-between border-b bg-white px-6 py-4">
@@ -101,5 +113,21 @@ export default async function DashboardPage() {
         </p>
       </section>
     </main>
+  );
+}
+
+export default function DashboardPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-screen flex items-center justify-center bg-gray-50">
+          <p className="text-gray-600">
+            Loading CivicTrack Dashboard...
+          </p>
+        </main>
+      }
+    >
+      <DashboardContent />
+    </Suspense>
   );
 }
