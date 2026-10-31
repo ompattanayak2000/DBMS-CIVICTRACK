@@ -1,5 +1,6 @@
 
 import mongoose from "mongoose";
+import { GridFSBucket, Db } from "mongodb";
 
 const MONGODB_URI: string = process.env.MONGODB_URI ?? "";
 
@@ -40,4 +41,13 @@ export async function connectMongoDB() {
   }
 
   return cached.conn;
+}
+
+export async function getEvidenceBucket() {
+  const connection = await connectMongoDB();
+  const database = connection.connection.db as Db;
+
+  return new GridFSBucket(database, {
+    bucketName: "issue_evidence",
+  });
 }
