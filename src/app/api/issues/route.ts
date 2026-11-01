@@ -1,8 +1,10 @@
+
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { cookies } from "next/headers";
 import { postgresPool } from "@/lib/postgres";
 import { verifySession } from "@/lib/auth";
+import { createNotification } from "@/lib/notifications";
 
 const issueSchema = z
   .object({
@@ -191,6 +193,31 @@ export async function POST(request: Request) {
       );
 
       await client.query("COMMIT");
+
+      // Notify all admins about the newly reported issue.
+      try {
+        const adminResult = await postgresPool.query(
+          "SELECT user_id FROM users WHERE role_id = 2"
+        );
+
+        await Promise.all(
+          adminResult.rows.map((admin) =>
+            createNotification({
+              userId: Number(admin.user_id),
+              role: "admin",
+              issueId: Number(issue.issue_id),
+              title: "New Civic Issue Reported",
+              message: `A new issue "${issue.title}" has been reported by a citizen.`,
+              type: "issue",
+            })
+          )
+        );
+      } catch (notificationError) {
+        console.error(
+          "Admin notification failed:",
+          notificationError
+        );
+      }
 
       return NextResponse.json(
         {

@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import { postgresPool } from "@/lib/postgres";
 import { verifySession } from "@/lib/auth";
+import { createNotification } from "@/lib/notifications";
 
 const assignmentSchema = z.object({
   issue_id: z.number().int().positive(),
@@ -127,6 +128,8 @@ export async function POST(request: Request) {
   const client = await postgresPool.connect();
 
   let transactionStarted = false;
+  let assignmentAction: "assigned" | "reassigned" | null = null;
+  let issueTitle = "";
 
   try {
     await client.query("BEGIN");
@@ -155,7 +158,7 @@ export async function POST(request: Request) {
 
     // Lock the issue to prevent concurrent assignment operations.
     const issueResult = await client.query(
-      `SELECT issue_id, status
+      `SELECT issue_id, title, status
        FROM issues
        WHERE issue_id = $1
        FOR UPDATE`,
@@ -173,6 +176,7 @@ export async function POST(request: Request) {
     }
 
     const oldStatus = issueResult.rows[0].status;
+    issueTitle = issueResult.rows[0].title;
 
     if (["resolved", "closed", "rejected"].includes(oldStatus)) {
       await client.query("ROLLBACK");
@@ -283,6 +287,31 @@ export async function POST(request: Request) {
 
     await client.query("COMMIT");
     transactionStarted = false;
+
+    assignmentAction = action;
+
+    // Notify the newly assigned staff member after the PostgreSQL commit.
+    try {
+      await createNotification({
+        userId: staff_user_id,
+        role: "staff",
+        issueId: issue_id,
+        title:
+          action === "reassigned"
+            ? "Issue Reassigned to You"
+            : "New Issue Assigned",
+        message:
+          action === "reassigned"
+            ? `The issue "${issueTitle}" has been reassigned to you.`
+            : `The issue "${issueTitle}" has been assigned to you.`,
+        type: "assignment",
+      });
+    } catch (notificationError) {
+      console.error(
+        "Staff assignment notification failed:",
+        notificationError
+      );
+    }
 
     return NextResponse.json(
       {

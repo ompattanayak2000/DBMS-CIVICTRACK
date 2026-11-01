@@ -4,6 +4,7 @@ import { cookies } from "next/headers";
 import { z } from "zod";
 import { postgresPool } from "@/lib/postgres";
 import { verifySession } from "@/lib/auth";
+import { createNotification } from "@/lib/notifications";
 
 const statusSchema = z.object({
   status: z.enum([
@@ -15,55 +16,57 @@ const statusSchema = z.object({
     "closed",
     "rejected",
   ]),
-  remarks: z.string().trim().max(1000).optional(),
+  remarks: z.string().trim().min(3).max(1000),
 });
 
-export async function PATCH(
-  request: Request,
-  { params }: { params: Promise<{ issueId: string }> }
-) {
-  // 1. Verify the session
+async function verifyAdmin() {
   const cookieStore = await cookies();
   const token = cookieStore.get("civictrack_session")?.value;
 
   if (!token) {
-    return NextResponse.json(
-      { success: false, message: "Please log in first." },
-      { status: 401 }
-    );
+    return { authorized: false as const, status: 401 };
   }
 
   const session = await verifySession(token);
 
   if (!session) {
-    return NextResponse.json(
-      { success: false, message: "Invalid session. Please log in again." },
-      { status: 401 }
-    );
+    return { authorized: false as const, status: 401 };
   }
 
-  // 2. Check admin role directly in PostgreSQL
-  const userResult = await postgresPool.query(
-    `SELECT role_id
-     FROM users
-     WHERE user_id = $1`,
+  const result = await postgresPool.query(
+    "SELECT role_id FROM users WHERE user_id = $1",
     [session.user_id]
   );
 
   if (
-    userResult.rows.length === 0 ||
-    Number(userResult.rows[0].role_id) !== 2
+    result.rows.length === 0 ||
+    Number(result.rows[0].role_id) !== 2
   ) {
+    return { authorized: false as const, status: 403 };
+  }
+
+  return {
+    authorized: true as const,
+    userId: session.user_id,
+  };
+}
+
+export async function PATCH(
+  request: Request,
+  { params }: { params: Promise<{ issueId: string }> }
+) {
+  const auth = await verifyAdmin();
+
+  if (!auth.authorized) {
     return NextResponse.json(
       {
         success: false,
         message: "Access denied. Admin privileges required.",
       },
-      { status: 403 }
+      { status: auth.status }
     );
   }
 
-  // 3. Validate issue ID
   const { issueId } = await params;
   const parsedIssueId = Number(issueId);
 
@@ -74,7 +77,6 @@ export async function PATCH(
     );
   }
 
-  // 4. Validate request body
   let body: unknown;
 
   try {
@@ -92,7 +94,7 @@ export async function PATCH(
     return NextResponse.json(
       {
         success: false,
-        message: "Please provide a valid issue status.",
+        message: "Provide a valid status and remarks.",
         errors: validation.error.flatten().fieldErrors,
       },
       { status: 400 }
@@ -100,18 +102,13 @@ export async function PATCH(
   }
 
   const { status, remarks } = validation.data;
-
-  // 5. Update issue and history in one transaction
-  let client;
+  const client = await postgresPool.connect();
 
   try {
-    client = await postgresPool.connect();
-
     await client.query("BEGIN");
 
-    // Lock the issue row while updating it
     const issueResult = await client.query(
-      `SELECT issue_id, status
+      `SELECT issue_id, title, citizen_id, status
        FROM issues
        WHERE issue_id = $1
        FOR UPDATE`,
@@ -127,7 +124,8 @@ export async function PATCH(
       );
     }
 
-    const oldStatus = issueResult.rows[0].status;
+    const issue = issueResult.rows[0];
+    const oldStatus = issue.status;
 
     if (oldStatus === status) {
       await client.query("ROLLBACK");
@@ -141,30 +139,36 @@ export async function PATCH(
       );
     }
 
-    // Update the issue
     await client.query(
       `UPDATE issues
-       SET status = $1,
-           updated_at = CURRENT_TIMESTAMP
+       SET status = $1, updated_at = CURRENT_TIMESTAMP
        WHERE issue_id = $2`,
       [status, parsedIssueId]
     );
 
-    // Record the status change
     await client.query(
       `INSERT INTO issue_status_history
        (issue_id, old_status, new_status, changed_by, remarks)
        VALUES ($1, $2, $3, $4, $5)`,
-      [
-        parsedIssueId,
-        oldStatus,
-        status,
-        session.user_id,
-        remarks || "Issue status updated by admin",
-      ]
+      [parsedIssueId, oldStatus, status, auth.userId, remarks]
     );
 
     await client.query("COMMIT");
+
+    const notificationCreated = await createNotification({
+      userId: Number(issue.citizen_id),
+      role: "citizen",
+      issueId: parsedIssueId,
+      title: "Issue Status Updated",
+      message: `The status of your issue "${issue.title}" has changed from "${oldStatus}" to "${status}".`,
+      type: "status",
+    });
+
+    if (!notificationCreated) {
+      console.error(
+        `Failed to create citizen notification for issue ${parsedIssueId}.`
+      );
+    }
 
     return NextResponse.json({
       success: true,
@@ -176,11 +180,8 @@ export async function PATCH(
       },
     });
   } catch (error) {
-    if (client) {
-      await client.query("ROLLBACK");
-    }
-
-    console.error("Issue status update failed:", error);
+    await client.query("ROLLBACK");
+    console.error("Admin status update failed:", error);
 
     return NextResponse.json(
       {
@@ -190,6 +191,6 @@ export async function PATCH(
       { status: 500 }
     );
   } finally {
-    client?.release();
+    client.release();
   }
 }
