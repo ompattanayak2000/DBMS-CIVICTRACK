@@ -25,6 +25,19 @@ type Evidence = {
   url: string;
 };
 
+type Feedback = {
+  feedback_id: number;
+  issue_id: number;
+  rating: number;
+  comments: string | null;
+  created_at: string;
+};
+
+type FeedbackDraft = {
+  rating: number;
+  comments: string;
+};
+
 function formatStatus(status: string) {
   return status.replaceAll("_", " ");
 }
@@ -55,6 +68,14 @@ export default function MyIssuesPage() {
   const [issues, setIssues] = useState<Issue[]>([]);
   const [evidenceByIssue, setEvidenceByIssue] =
     useState<Record<number, Evidence[]>>({});
+  const [feedbackByIssue, setFeedbackByIssue] =
+    useState<Record<number, Feedback>>({});
+  const [feedbackDrafts, setFeedbackDrafts] =
+    useState<Record<number, FeedbackDraft>>({});
+  const [feedbackMessages, setFeedbackMessages] =
+    useState<Record<number, string>>({});
+  const [submittingIssue, setSubmittingIssue] = useState<number | null>(null);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [evidenceLoading, setEvidenceLoading] = useState(false);
@@ -80,7 +101,7 @@ export default function MyIssuesPage() {
         const loadedIssues: Issue[] = result.issues;
         setIssues(loadedIssues);
 
-        // Fetch evidence metadata for every issue
+        // Load evidence metadata for every issue.
         setEvidenceLoading(true);
 
         const evidenceResults = await Promise.all(
@@ -92,10 +113,7 @@ export default function MyIssuesPage() {
               );
 
               if (!evidenceResponse.ok) {
-                return {
-                  issueId: issue.issue_id,
-                  evidence: [],
-                };
+                return { issueId: issue.issue_id, evidence: [] as Evidence[] };
               }
 
               const evidenceResult = await evidenceResponse.json();
@@ -103,14 +121,11 @@ export default function MyIssuesPage() {
               return {
                 issueId: issue.issue_id,
                 evidence: evidenceResult.success
-                  ? evidenceResult.evidence as Evidence[]
+                  ? (evidenceResult.evidence as Evidence[])
                   : [],
               };
             } catch {
-              return {
-                issueId: issue.issue_id,
-                evidence: [],
-              };
+              return { issueId: issue.issue_id, evidence: [] as Evidence[] };
             }
           })
         );
@@ -122,6 +137,34 @@ export default function MyIssuesPage() {
         });
 
         setEvidenceByIssue(evidenceMap);
+
+        // Load feedback already submitted by this citizen.
+        try {
+          const feedbackResponse = await fetch("/api/feedback", {
+            credentials: "same-origin",
+          });
+
+          if (feedbackResponse.status === 401) {
+            window.location.href = "/login";
+            return;
+          }
+
+          if (feedbackResponse.ok) {
+            const feedbackResult = await feedbackResponse.json();
+
+            if (feedbackResult.success) {
+              const feedbackMap: Record<number, Feedback> = {};
+
+              (feedbackResult.feedback as Feedback[]).forEach((item) => {
+                feedbackMap[item.issue_id] = item;
+              });
+
+              setFeedbackByIssue(feedbackMap);
+            }
+          }
+        } catch (feedbackError) {
+          console.error("Unable to load existing feedback:", feedbackError);
+        }
       } catch (err) {
         setError(
           err instanceof Error
@@ -136,6 +179,80 @@ export default function MyIssuesPage() {
 
     loadIssues();
   }, []);
+
+  function updateFeedbackDraft(
+    issueId: number,
+    changes: Partial<FeedbackDraft>
+  ) {
+    setFeedbackDrafts((previous) => ({
+      ...previous,
+      [issueId]: {
+        rating: previous[issueId]?.rating ?? 0,
+        comments: previous[issueId]?.comments ?? "",
+        ...changes,
+      },
+    }));
+  }
+
+  async function submitFeedback(issueId: number) {
+    const draft = feedbackDrafts[issueId];
+
+    if (!draft || draft.rating < 1 || draft.rating > 5) {
+      setFeedbackMessages((previous) => ({
+        ...previous,
+        [issueId]: "Please select a rating between 1 and 5 stars.",
+      }));
+      return;
+    }
+
+    setSubmittingIssue(issueId);
+
+    setFeedbackMessages((previous) => ({
+      ...previous,
+      [issueId]: "",
+    }));
+
+    try {
+      const response = await fetch("/api/feedback", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          issue_id: issueId,
+          rating: draft.rating,
+          comments: draft.comments.trim(),
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "Unable to submit feedback.");
+      }
+
+      setFeedbackByIssue((previous) => ({
+        ...previous,
+        [issueId]: result.feedback as Feedback,
+      }));
+
+      setFeedbackMessages((previous) => ({
+        ...previous,
+        [issueId]: "Thank you! Your feedback has been submitted.",
+      }));
+    } catch (err) {
+      setFeedbackMessages((previous) => ({
+        ...previous,
+        [issueId]:
+          err instanceof Error
+            ? err.message
+            : "Something went wrong. Please try again.",
+      }));
+    } finally {
+      setSubmittingIssue(null);
+    }
+  }
 
   return (
     <main className="min-h-screen bg-gray-50 text-gray-900">
@@ -180,9 +297,7 @@ export default function MyIssuesPage() {
 
         {!loading && !error && issues.length === 0 && (
           <div className="mt-8 rounded-xl border bg-white p-8 text-center">
-            <h2 className="text-xl font-semibold">
-              No issues reported yet
-            </h2>
+            <h2 className="text-xl font-semibold">No issues reported yet</h2>
             <p className="mt-2 text-gray-600">
               Once you report a civic issue, it will appear here.
             </p>
@@ -197,6 +312,13 @@ export default function MyIssuesPage() {
 
             {issues.map((issue) => {
               const evidence = evidenceByIssue[issue.issue_id] ?? [];
+              const existingFeedback = feedbackByIssue[issue.issue_id];
+              const draft = feedbackDrafts[issue.issue_id] ?? {
+                rating: 0,
+                comments: "",
+              };
+              const isEligible =
+                issue.status === "resolved" || issue.status === "closed";
 
               return (
                 <article
@@ -309,6 +431,134 @@ export default function MyIssuesPage() {
                       </div>
                     )}
                   </div>
+
+                  {/* Citizen Feedback */}
+                  {isEligible && (
+                    <div className="mt-5 border-t pt-5">
+                      <h3 className="text-lg font-semibold text-gray-900">
+                        Your Feedback
+                      </h3>
+
+                      {existingFeedback ? (
+                        <div className="mt-3 rounded-lg border border-green-200 bg-green-50 p-4">
+                          <p className="font-semibold text-green-800">
+                            Feedback submitted successfully
+                          </p>
+
+                          <div
+                            className="mt-2 text-xl text-yellow-500"
+                            aria-label={`${existingFeedback.rating} out of 5 stars`}
+                          >
+                            {"★".repeat(existingFeedback.rating)}
+                            {"☆".repeat(5 - existingFeedback.rating)}
+                          </div>
+
+                          {existingFeedback.comments && (
+                            <p className="mt-2 text-sm text-gray-700">
+                              {existingFeedback.comments}
+                            </p>
+                          )}
+
+                          <p className="mt-2 text-xs text-gray-500">
+                            Submitted on{" "}
+                            {new Date(
+                              existingFeedback.created_at
+                            ).toLocaleString()}
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="mt-3 rounded-lg border bg-gray-50 p-4">
+                          <p className="text-sm text-gray-600">
+                            Your issue has been resolved. Please rate your
+                            experience.
+                          </p>
+
+                          <p className="mt-4 text-sm font-semibold">
+                            Select your rating
+                          </p>
+
+                          <div className="mt-2 flex gap-2">
+                            {[1, 2, 3, 4, 5].map((star) => (
+                              <button
+                                key={star}
+                                type="button"
+                                onClick={() =>
+                                  updateFeedbackDraft(issue.issue_id, {
+                                    rating: star,
+                                  })
+                                }
+                                aria-label={`Rate ${star} out of 5 stars`}
+                                aria-pressed={draft.rating === star}
+                                className={`text-3xl transition ${
+                                  star <= draft.rating
+                                    ? "text-yellow-500"
+                                    : "text-gray-300"
+                                } hover:scale-110`}
+                              >
+                                ★
+                              </button>
+                            ))}
+                          </div>
+
+                          <label
+                            htmlFor={`feedback-${issue.issue_id}`}
+                            className="mt-4 block text-sm font-semibold"
+                          >
+                            Comments (optional)
+                          </label>
+
+                          <textarea
+                            id={`feedback-${issue.issue_id}`}
+                            rows={3}
+                            maxLength={2000}
+                            value={draft.comments}
+                            onChange={(event) =>
+                              updateFeedbackDraft(issue.issue_id, {
+                                comments: event.target.value,
+                              })
+                            }
+                            placeholder="Share your experience with the resolution..."
+                            className="mt-2 w-full rounded-lg border border-gray-300 bg-white p-3 text-sm outline-none focus:border-green-600 focus:ring-2 focus:ring-green-100"
+                          />
+
+                          <button
+                            type="button"
+                            onClick={() => submitFeedback(issue.issue_id)}
+                            disabled={submittingIssue === issue.issue_id}
+                            className="mt-4 rounded-lg bg-green-700 px-5 py-2.5 font-semibold text-white hover:bg-green-800 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {submittingIssue === issue.issue_id
+                              ? "Submitting..."
+                              : "Submit Feedback"}
+                          </button>
+
+                          {feedbackMessages[issue.issue_id] && (
+                            <p
+                              role="status"
+                              className={`mt-3 text-sm ${
+                                feedbackMessages[issue.issue_id].includes(
+                                  "successfully"
+                                )
+                                  ? "text-green-700"
+                                  : "text-red-600"
+                              }`}
+                            >
+                              {feedbackMessages[issue.issue_id]}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {!isEligible && (
+                    <div className="mt-5 border-t pt-4">
+                      <p className="text-sm text-gray-500">
+                        Feedback will be available once this issue is resolved
+                        or closed.
+                      </p>
+                    </div>
+                  )}
                 </article>
               );
             })}

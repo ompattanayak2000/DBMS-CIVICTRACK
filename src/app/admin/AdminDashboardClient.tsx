@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useEffect, useState } from "react";
@@ -47,6 +48,18 @@ type Assignment = {
   issue_status: string;
 };
 
+type Feedback = {
+  feedback_id: number;
+  issue_id: number;
+  citizen_id: number;
+  rating: number;
+  comments: string | null;
+  created_at: string;
+  issue_title: string;
+  citizen_name: string;
+  citizen_email: string;
+};
+
 type DashboardStats = {
   total_issues: number;
   pending_issues: number;
@@ -80,6 +93,11 @@ export default function AdminDashboardClient() {
     useState<Record<number, Evidence[]>>({});
 
   const [staffList, setStaffList] = useState<Staff[]>([]);
+
+  // Feedback Management
+  const [feedbackList, setFeedbackList] = useState<Feedback[]>([]);
+  const [feedbackLoading, setFeedbackLoading] = useState(false);
+  const [feedbackError, setFeedbackError] = useState("");
 
   // Staff Management form
   const [newStaffName, setNewStaffName] = useState("");
@@ -194,6 +212,41 @@ export default function AdminDashboardClient() {
     setStaffList(result.staff);
   }
 
+  // Load all citizen feedback
+  async function loadFeedback() {
+    setFeedbackLoading(true);
+    setFeedbackError("");
+
+    try {
+      const response = await fetch("/api/feedback", {
+        credentials: "same-origin",
+      });
+
+      if (response.status === 401) {
+        window.location.href = "/login";
+        return;
+      }
+
+      if (response.status === 403) {
+        throw new Error("You are not authorized to view feedback.");
+      }
+
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "Unable to load feedback.");
+      }
+
+      setFeedbackList(result.feedback as Feedback[]);
+    } catch (err) {
+      setFeedbackError(
+        err instanceof Error ? err.message : "Unable to load feedback."
+      );
+    } finally {
+      setFeedbackLoading(false);
+    }
+  }
+
   // Create a staff account through the admin-only API
   async function createStaff(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -262,7 +315,7 @@ export default function AdminDashboardClient() {
     setAssignments(assignmentMap);
   }
 
-  // Refresh all dashboard information
+  // Refresh dashboard information
   async function refreshDashboard() {
     await Promise.all([
       loadDashboard(),
@@ -278,6 +331,7 @@ export default function AdminDashboardClient() {
           loadDashboard(),
           loadStaff(),
           loadAssignments(),
+          loadFeedback(),
         ]);
       } catch (err) {
         setError(
@@ -465,6 +519,12 @@ export default function AdminDashboardClient() {
   function formatFileSize(size: number) {
     return `${(size / 1024).toFixed(1)} KB`;
   }
+
+  const averageRating =
+    feedbackList.length > 0
+      ? feedbackList.reduce((sum, item) => sum + item.rating, 0) /
+        feedbackList.length
+      : 0;
 
   return (
     <main className="min-h-screen bg-gray-50 text-gray-900">
@@ -992,6 +1052,129 @@ export default function AdminDashboardClient() {
                 </div>
               </div>
             </section>
+
+            {/* Feedback Management */}
+            <section className="mt-10 rounded-xl border bg-white shadow-sm">
+              <div className="border-b px-6 py-5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-xl font-bold">
+                      Citizen Feedback
+                    </h2>
+                    <p className="mt-1 text-sm text-gray-500">
+                      Review ratings and comments submitted by citizens after issue resolution.
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={loadFeedback}
+                    disabled={feedbackLoading}
+                    className="rounded-lg border border-green-700 px-4 py-2 text-sm font-semibold text-green-700 hover:bg-green-50 disabled:opacity-50"
+                  >
+                    {feedbackLoading ? "Refreshing..." : "Refresh Feedback"}
+                  </button>
+                </div>
+              </div>
+
+              {feedbackLoading && feedbackList.length === 0 ? (
+                <p className="p-6 text-gray-500">
+                  Loading feedback...
+                </p>
+              ) : feedbackError ? (
+                <div className="m-6 rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">
+                  {feedbackError}
+                </div>
+              ) : (
+                <div className="p-6">
+
+                  {/* Feedback Statistics */}
+                  <div className="mb-6 grid gap-5 sm:grid-cols-2">
+                    <div className="rounded-xl border bg-gray-50 p-5">
+                      <p className="text-sm text-gray-500">
+                        Total Feedback Submissions
+                      </p>
+                      <h3 className="mt-2 text-3xl font-bold">
+                        {feedbackList.length}
+                      </h3>
+                    </div>
+
+                    <div className="rounded-xl border bg-gray-50 p-5">
+                      <p className="text-sm text-gray-500">
+                        Average Rating
+                      </p>
+                      <h3 className="mt-2 text-3xl font-bold">
+                        {averageRating.toFixed(1)} / 5
+                      </h3>
+                      <p className="mt-1 text-xl text-yellow-500">
+                        {feedbackList.length > 0
+                          ? "★".repeat(Math.round(averageRating))
+                          : "No ratings yet"}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Feedback List */}
+                  <h3 className="mb-4 text-lg font-semibold">
+                    Submitted Feedback
+                  </h3>
+
+                  {feedbackList.length === 0 ? (
+                    <div className="rounded-lg border border-dashed p-8 text-center text-gray-500">
+                      No feedback has been submitted yet.
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {feedbackList.map((item) => (
+                        <article
+                          key={item.feedback_id}
+                          className="rounded-xl border p-5"
+                        >
+                          <div className="flex flex-col justify-between gap-3 sm:flex-row">
+                            <div>
+                              <p className="font-semibold text-gray-900">
+                                {item.citizen_name}
+                              </p>
+                              <p className="text-sm text-gray-500">
+                                {item.citizen_email}
+                              </p>
+                            </div>
+
+                            <div className="text-sm text-gray-500">
+                              {new Date(item.created_at).toLocaleString()}
+                            </div>
+                          </div>
+
+                          <div className="mt-4 rounded-lg bg-gray-50 p-4">
+                            <p className="font-semibold">
+                              Issue #{item.issue_id}: {item.issue_title}
+                            </p>
+
+                            <p className="mt-2 text-xl text-yellow-500">
+                              {"★".repeat(item.rating)}
+                              {"☆".repeat(5 - item.rating)}
+                              <span className="ml-2 text-sm text-gray-600">
+                                {item.rating}/5
+                              </span>
+                            </p>
+
+                            <div className="mt-3">
+                              <p className="text-xs font-semibold uppercase text-gray-500">
+                                Citizen Comments
+                              </p>
+                              <p className="mt-1 whitespace-pre-wrap text-gray-700">
+                                {item.comments || "No comments provided."}
+                              </p>
+                            </div>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </section>
+
           </>
         )}
 
