@@ -5,6 +5,18 @@ import { FormEvent, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
+type LoginResponse = {
+  success: boolean;
+  message: string;
+  redirectTo?: string;
+  user?: {
+    user_id: number;
+    full_name: string;
+    email: string;
+    role_id: number;
+  };
+};
+
 export default function LoginPage() {
   const router = useRouter();
 
@@ -15,25 +27,36 @@ export default function LoginPage() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+
     setMessage("");
     setIsLoading(true);
 
     try {
       const response = await fetch("/api/auth/login", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+        },
         credentials: "same-origin",
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({
+          email: email.trim(),
+          password,
+        }),
       });
 
-      const result = await response.json();
+      const result: LoginResponse = await response.json();
 
-      if (!response.ok) {
+      if (!response.ok || !result.success) {
         setMessage(result.message || "Login failed. Please try again.");
         return;
       }
 
-      router.push("/dashboard");
+      if (!result.redirectTo) {
+        setMessage("Unable to determine your account dashboard.");
+        return;
+      }
+
+      router.replace(result.redirectTo);
       router.refresh();
     } catch {
       setMessage("Unable to connect to the server. Please try again.");
@@ -49,16 +72,23 @@ export default function LoginPage() {
           CivicTrack
         </Link>
 
-        <h1 className="mt-6 text-3xl font-bold">Welcome back</h1>
+        <h1 className="mt-6 text-3xl font-bold">
+          Welcome back
+        </h1>
+
         <p className="mt-2 text-sm text-gray-600">
-          Sign in to track your civic issues.
+          Sign in to access your CivicTrack account.
         </p>
 
         <form onSubmit={handleSubmit} className="mt-8 space-y-5">
           <div>
-            <label htmlFor="email" className="mb-1 block text-sm font-medium">
+            <label
+              htmlFor="email"
+              className="mb-1 block text-sm font-medium"
+            >
               Email address
             </label>
+
             <input
               id="email"
               type="email"
@@ -73,9 +103,13 @@ export default function LoginPage() {
           </div>
 
           <div>
-            <label htmlFor="password" className="mb-1 block text-sm font-medium">
+            <label
+              htmlFor="password"
+              className="mb-1 block text-sm font-medium"
+            >
               Password
             </label>
+
             <input
               id="password"
               type="password"
@@ -105,7 +139,10 @@ export default function LoginPage() {
 
         <p className="mt-6 text-center text-sm text-gray-600">
           Don't have an account?{" "}
-          <Link href="/register" className="font-semibold text-green-700 hover:underline">
+          <Link
+            href="/register"
+            className="font-semibold text-green-700 hover:underline"
+          >
             Register
           </Link>
         </p>

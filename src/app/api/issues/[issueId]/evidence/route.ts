@@ -17,6 +17,128 @@ const ALLOWED_TYPES = [
   "image/webp",
 ];
 
+// GET: Retrieve evidence metadata for an authorized issue
+export async function GET(
+  request: Request,
+  context: { params: Promise<{ issueId: string }> }
+) {
+  try {
+    // 1. Authenticate the user
+    const cookieStore = await cookies();
+    const token = cookieStore.get("civictrack_session")?.value;
+
+    if (!token) {
+      return NextResponse.json(
+        { success: false, message: "Please log in first." },
+        { status: 401 }
+      );
+    }
+
+    const session = await verifySession(token);
+
+    if (!session) {
+      return NextResponse.json(
+        { success: false, message: "Invalid session." },
+        { status: 401 }
+      );
+    }
+
+    // 2. Validate issue ID
+    const { issueId } = await context.params;
+    const parsedIssueId = Number(issueId);
+
+    if (
+      !Number.isSafeInteger(parsedIssueId) ||
+      parsedIssueId <= 0
+    ) {
+      return NextResponse.json(
+        { success: false, message: "Invalid issue ID." },
+        { status: 400 }
+      );
+    }
+
+    // 3. Check issue access based on user role
+    let accessResult;
+
+    if (session.role_id === 1) {
+      // Citizen: only their own issues
+      accessResult = await postgresPool.query(
+        `SELECT issue_id
+         FROM issues
+         WHERE issue_id = $1 AND citizen_id = $2`,
+        [parsedIssueId, session.user_id]
+      );
+    } else if (session.role_id === 2) {
+      // Admin: all issues
+      accessResult = await postgresPool.query(
+        `SELECT issue_id
+         FROM issues
+         WHERE issue_id = $1`,
+        [parsedIssueId]
+      );
+    } else if (session.role_id === 3) {
+      // Staff: only issues assigned to them
+      accessResult = await postgresPool.query(
+        `SELECT i.issue_id
+         FROM issues i
+         JOIN assignments a ON a.issue_id = i.issue_id
+         WHERE i.issue_id = $1
+           AND a.staff_user_id = $2`,
+        [parsedIssueId, session.user_id]
+      );
+    } else {
+      return NextResponse.json(
+        { success: false, message: "Access denied." },
+        { status: 403 }
+      );
+    }
+
+    if (accessResult.rowCount === 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Issue not found or access denied.",
+        },
+        { status: 404 }
+      );
+    }
+
+    // 4. Retrieve evidence metadata from MongoDB GridFS
+    const bucket = await getEvidenceBucket();
+
+    const files = await bucket.find({
+      "metadata.issueId": parsedIssueId,
+    }).toArray();
+
+    const evidence = files.map((file) => ({
+      fileId: file._id.toString(),
+      fileName:
+        file.metadata?.originalName ?? file.filename,
+      contentType:
+        file.metadata?.contentType ?? "application/octet-stream",
+      size: file.length,
+      uploadedAt: file.uploadDate,
+      url: `/api/issues/${parsedIssueId}/evidence/${file._id.toString()}`,
+    }));
+
+    return NextResponse.json({
+      success: true,
+      evidence,
+    });
+  } catch (error) {
+    console.error("Fetching issue evidence failed:", error);
+
+    return NextResponse.json(
+      {
+        success: false,
+        message: "Unable to retrieve issue evidence.",
+      },
+      { status: 500 }
+    );
+  }
+}
+
+// POST: Upload evidence images for a citizen's own issue
 export async function POST(
   request: Request,
   context: { params: Promise<{ issueId: string }> }

@@ -2,6 +2,7 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { z } from "zod";
+
 import { postgresPool } from "@/lib/postgres";
 import { verifySession } from "@/lib/auth";
 
@@ -43,7 +44,7 @@ async function verifyAdmin() {
   };
 }
 
-// GET: View existing issue assignments
+// GET: View the latest assignment for each issue
 export async function GET() {
   try {
     const auth = await verifyAdmin();
@@ -56,7 +57,7 @@ export async function GET() {
     }
 
     const result = await postgresPool.query(`
-      SELECT
+      SELECT DISTINCT ON (a.issue_id)
         a.assignment_id,
         a.issue_id,
         a.staff_user_id,
@@ -70,7 +71,7 @@ export async function GET() {
       FROM assignments a
       JOIN users u ON a.staff_user_id = u.user_id
       JOIN issues i ON a.issue_id = i.issue_id
-      ORDER BY a.assigned_at DESC
+      ORDER BY a.issue_id, a.assigned_at DESC, a.assignment_id DESC
     `);
 
     return NextResponse.json({
@@ -87,7 +88,7 @@ export async function GET() {
   }
 }
 
-// POST: Assign an issue to a staff member
+// POST: Assign or reassign an issue to a staff member
 export async function POST(request: Request) {
   const auth = await verifyAdmin();
 
@@ -125,8 +126,11 @@ export async function POST(request: Request) {
   const { issue_id, staff_user_id, notes } = validation.data;
   const client = await postgresPool.connect();
 
+  let transactionStarted = false;
+
   try {
     await client.query("BEGIN");
+    transactionStarted = true;
 
     // Confirm that the selected user is a staff member.
     const staffResult = await client.query(
@@ -138,14 +142,18 @@ export async function POST(request: Request) {
 
     if (staffResult.rows.length === 0) {
       await client.query("ROLLBACK");
+      transactionStarted = false;
 
       return NextResponse.json(
-        { success: false, message: "Selected staff member does not exist." },
+        {
+          success: false,
+          message: "Selected staff member does not exist.",
+        },
         { status: 404 }
       );
     }
 
-    // Lock the issue while the assignment is being processed.
+    // Lock the issue to prevent concurrent assignment operations.
     const issueResult = await client.query(
       `SELECT issue_id, status
        FROM issues
@@ -156,6 +164,7 @@ export async function POST(request: Request) {
 
     if (issueResult.rows.length === 0) {
       await client.query("ROLLBACK");
+      transactionStarted = false;
 
       return NextResponse.json(
         { success: false, message: "Issue not found." },
@@ -167,6 +176,7 @@ export async function POST(request: Request) {
 
     if (["resolved", "closed", "rejected"].includes(oldStatus)) {
       await client.query("ROLLBACK");
+      transactionStarted = false;
 
       return NextResponse.json(
         {
@@ -177,21 +187,83 @@ export async function POST(request: Request) {
       );
     }
 
-    // Save the assignment.
-    const assignmentResult = await client.query(
-      `INSERT INTO assignments
-        (issue_id, staff_user_id, assigned_by, notes)
-       VALUES ($1, $2, $3, $4)
-       RETURNING assignment_id, issue_id, staff_user_id, assigned_by,
-                 assigned_at, notes`,
-      [issue_id, staff_user_id, auth.userId, notes || null]
+    // Find the current assignment for this issue.
+    const existingAssignment = await client.query(
+      `SELECT assignment_id, staff_user_id
+       FROM assignments
+       WHERE issue_id = $1
+       ORDER BY assigned_at DESC, assignment_id DESC
+       LIMIT 1
+       FOR UPDATE`,
+      [issue_id]
     );
+
+    let assignmentResult;
+    let action: "assigned" | "reassigned";
+
+    if (existingAssignment.rows.length > 0) {
+      const currentAssignment = existingAssignment.rows[0];
+
+      // Update the existing assignment instead of inserting a duplicate.
+      assignmentResult = await client.query(
+        `UPDATE assignments
+         SET staff_user_id = $1,
+             assigned_by = $2,
+             assigned_at = CURRENT_TIMESTAMP,
+             notes = $3
+         WHERE assignment_id = $4
+         RETURNING
+           assignment_id,
+           issue_id,
+           staff_user_id,
+           assigned_by,
+           assigned_at,
+           notes`,
+        [
+          staff_user_id,
+          auth.userId,
+          notes || null,
+          currentAssignment.assignment_id,
+        ]
+      );
+
+      action =
+        Number(currentAssignment.staff_user_id) === staff_user_id
+          ? "assigned"
+          : "reassigned";
+
+      // Remove any older duplicate assignment rows for this issue.
+      await client.query(
+        `DELETE FROM assignments
+         WHERE issue_id = $1
+           AND assignment_id <> $2`,
+        [issue_id, currentAssignment.assignment_id]
+      );
+    } else {
+      // Create the first assignment for this issue.
+      assignmentResult = await client.query(
+        `INSERT INTO assignments
+          (issue_id, staff_user_id, assigned_by, notes)
+         VALUES ($1, $2, $3, $4)
+         RETURNING
+           assignment_id,
+           issue_id,
+           staff_user_id,
+           assigned_by,
+           assigned_at,
+           notes`,
+        [issue_id, staff_user_id, auth.userId, notes || null]
+      );
+
+      action = "assigned";
+    }
 
     // Change status to assigned when necessary.
     if (oldStatus !== "assigned" && oldStatus !== "in_progress") {
       await client.query(
         `UPDATE issues
-         SET status = 'assigned', updated_at = CURRENT_TIMESTAMP
+         SET status = 'assigned',
+             updated_at = CURRENT_TIMESTAMP
          WHERE issue_id = $1`,
         [issue_id]
       );
@@ -210,17 +282,25 @@ export async function POST(request: Request) {
     }
 
     await client.query("COMMIT");
+    transactionStarted = false;
 
     return NextResponse.json(
       {
         success: true,
-        message: "Issue assigned successfully.",
+        action,
+        message:
+          action === "reassigned"
+            ? "Issue reassigned successfully."
+            : "Issue assigned successfully.",
         assignment: assignmentResult.rows[0],
       },
-      { status: 201 }
+      { status: 200 }
     );
   } catch (error) {
-    await client.query("ROLLBACK");
+    if (transactionStarted) {
+      await client.query("ROLLBACK");
+    }
+
     console.error("Issue assignment failed:", error);
 
     return NextResponse.json(

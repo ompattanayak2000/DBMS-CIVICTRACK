@@ -1,7 +1,7 @@
-
 "use client";
 
 import { useEffect, useState } from "react";
+import type { FormEvent } from "react";
 import Link from "next/link";
 import LogoutButton from "../../components/LogoutButton";
 
@@ -17,6 +17,34 @@ type Issue = {
   citizen_email: string;
   category_name: string;
   department_name: string | null;
+};
+
+type Evidence = {
+  fileId: string;
+  fileName: string;
+  contentType: string;
+  size: number;
+  uploadedAt: string;
+  url: string;
+};
+
+type Staff = {
+  user_id: number;
+  full_name: string;
+  email: string;
+};
+
+type Assignment = {
+  assignment_id: number;
+  issue_id: number;
+  staff_user_id: number;
+  assigned_by: number;
+  assigned_at: string;
+  notes: string | null;
+  staff_name: string;
+  staff_email: string;
+  issue_title: string;
+  issue_status: string;
 };
 
 type DashboardStats = {
@@ -47,6 +75,34 @@ const availableStatuses = [
 export default function AdminDashboardClient() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [issues, setIssues] = useState<Issue[]>([]);
+
+  const [evidenceByIssue, setEvidenceByIssue] =
+    useState<Record<number, Evidence[]>>({});
+
+  const [staffList, setStaffList] = useState<Staff[]>([]);
+
+  // Staff Management form
+  const [newStaffName, setNewStaffName] = useState("");
+  const [newStaffEmail, setNewStaffEmail] = useState("");
+  const [newStaffPassword, setNewStaffPassword] = useState("");
+  const [creatingStaff, setCreatingStaff] = useState(false);
+  const [staffMessage, setStaffMessage] = useState("");
+  const [staffError, setStaffError] = useState("");
+
+  const [assignments, setAssignments] = useState<
+    Record<number, Assignment>
+  >({});
+
+  const [selectedStaff, setSelectedStaff] = useState<
+    Record<number, string>
+  >({});
+
+  const [assignmentNotes, setAssignmentNotes] = useState<
+    Record<number, string>
+  >({});
+
+  const [assigningId, setAssigningId] = useState<number | null>(null);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -56,7 +112,7 @@ export default function AdminDashboardClient() {
 
   const [updatingId, setUpdatingId] = useState<number | null>(null);
 
-  // Load dashboard data
+  // Load dashboard data and evidence
   async function loadDashboard() {
     const response = await fetch("/api/admin/dashboard", {
       credentials: "same-origin",
@@ -80,12 +136,149 @@ export default function AdminDashboardClient() {
 
     setStats(result.stats);
     setIssues(result.issues);
+
+    // Fetch evidence metadata for every issue
+    const evidenceResults = await Promise.all(
+      result.issues.map(async (issue) => {
+        try {
+          const evidenceResponse = await fetch(
+            `/api/issues/${issue.issue_id}/evidence`,
+            { credentials: "same-origin" }
+          );
+
+          if (!evidenceResponse.ok) {
+            return {
+              issueId: issue.issue_id,
+              evidence: [],
+            };
+          }
+
+          const evidenceResult = await evidenceResponse.json();
+
+          return {
+            issueId: issue.issue_id,
+            evidence: evidenceResult.success
+              ? (evidenceResult.evidence as Evidence[])
+              : [],
+          };
+        } catch {
+          return {
+            issueId: issue.issue_id,
+            evidence: [],
+          };
+        }
+      })
+    );
+
+    const evidenceMap: Record<number, Evidence[]> = {};
+
+    evidenceResults.forEach((item) => {
+      evidenceMap[item.issueId] = item.evidence;
+    });
+
+    setEvidenceByIssue(evidenceMap);
   }
 
+  // Load all staff members
+  async function loadStaff() {
+    const response = await fetch("/api/admin/staff", {
+      credentials: "same-origin",
+    });
+
+    const result = await response.json();
+
+    if (!response.ok || !result.success) {
+      throw new Error(result.message || "Unable to load staff members.");
+    }
+
+    setStaffList(result.staff);
+  }
+
+  // Create a staff account through the admin-only API
+  async function createStaff(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setCreatingStaff(true);
+    setStaffMessage("");
+    setStaffError("");
+
+    try {
+      const response = await fetch("/api/admin/staff", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          full_name: newStaffName.trim(),
+          email: newStaffEmail.trim().toLowerCase(),
+          password: newStaffPassword,
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "Unable to create staff account.");
+      }
+
+      setStaffMessage(
+        result.message || "Staff account created successfully."
+      );
+
+      setNewStaffName("");
+      setNewStaffEmail("");
+      setNewStaffPassword("");
+
+      await loadStaff();
+    } catch (err) {
+      setStaffError(
+        err instanceof Error
+          ? err.message
+          : "Unable to create staff account."
+      );
+    } finally {
+      setCreatingStaff(false);
+    }
+  }
+
+  // Load existing assignments
+  async function loadAssignments() {
+    const response = await fetch("/api/admin/assignments", {
+      credentials: "same-origin",
+    });
+
+    const result = await response.json();
+
+    if (!response.ok || !result.success) {
+      throw new Error(result.message || "Unable to load assignments.");
+    }
+
+    const assignmentMap: Record<number, Assignment> = {};
+
+    (result.assignments as Assignment[]).forEach((assignment) => {
+      assignmentMap[assignment.issue_id] = assignment;
+    });
+
+    setAssignments(assignmentMap);
+  }
+
+  // Refresh all dashboard information
+  async function refreshDashboard() {
+    await Promise.all([
+      loadDashboard(),
+      loadAssignments(),
+    ]);
+  }
+
+  // Initialize dashboard
   useEffect(() => {
     async function initializeDashboard() {
       try {
-        await loadDashboard();
+        await Promise.all([
+          loadDashboard(),
+          loadStaff(),
+          loadAssignments(),
+        ]);
       } catch (err) {
         setError(
           err instanceof Error
@@ -99,6 +292,76 @@ export default function AdminDashboardClient() {
 
     initializeDashboard();
   }, []);
+
+  // Assign or reassign an issue
+  async function assignIssue(issueId: number) {
+    const staffUserId = selectedStaff[issueId];
+
+    if (!staffUserId) {
+      alert("Please select a staff member.");
+      return;
+    }
+
+    const currentAssignment = assignments[issueId];
+
+    if (
+      currentAssignment &&
+      Number(currentAssignment.staff_user_id) === Number(staffUserId)
+    ) {
+      alert("This issue is already assigned to the selected staff member.");
+      return;
+    }
+
+    const notes = assignmentNotes[issueId] || "";
+
+    setAssigningId(issueId);
+    setError("");
+
+    try {
+      const response = await fetch("/api/admin/assignments", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          issue_id: issueId,
+          staff_user_id: Number(staffUserId),
+          notes: notes.trim(),
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        throw new Error(result.message || "Unable to assign issue.");
+      }
+
+      alert(result.message || "Assignment saved successfully.");
+
+      setSelectedStaff((previous) => {
+        const updated = { ...previous };
+        delete updated[issueId];
+        return updated;
+      });
+
+      setAssignmentNotes((previous) => {
+        const updated = { ...previous };
+        delete updated[issueId];
+        return updated;
+      });
+
+      await refreshDashboard();
+    } catch (err) {
+      alert(
+        err instanceof Error
+          ? err.message
+          : "Unable to assign issue."
+      );
+    } finally {
+      setAssigningId(null);
+    }
+  }
 
   // Update issue status
   async function updateIssueStatus(issueId: number) {
@@ -152,9 +415,8 @@ export default function AdminDashboardClient() {
         );
       }
 
-      await loadDashboard();
+      await refreshDashboard();
 
-      // Clear the selected status for this issue
       setSelectedStatuses((previous) => {
         const updated = { ...previous };
         delete updated[issueId];
@@ -198,6 +460,10 @@ export default function AdminDashboardClient() {
 
   function formatStatus(status: string) {
     return status.replaceAll("_", " ");
+  }
+
+  function formatFileSize(size: number) {
+    return `${(size / 1024).toFixed(1)} KB`;
   }
 
   return (
@@ -333,111 +599,274 @@ export default function AdminDashboardClient() {
                         <th className="px-5 py-4">Priority</th>
                         <th className="px-5 py-4">Status</th>
                         <th className="px-5 py-4">Reported On</th>
+                        <th className="px-5 py-4">Evidence</th>
+                        <th className="px-5 py-4">Staff Assignment</th>
                         <th className="px-5 py-4">Update Status</th>
                       </tr>
                     </thead>
 
                     <tbody className="divide-y">
 
-                      {issues.map((issue) => (
-                        <tr
-                          key={issue.issue_id}
-                          className="hover:bg-gray-50"
-                        >
+                      {issues.map((issue) => {
+                        const evidence =
+                          evidenceByIssue[issue.issue_id] ?? [];
 
-                          <td className="px-5 py-4">
-                            <p className="font-semibold">
-                              #{issue.issue_id} - {issue.title}
-                            </p>
+                        const assignment =
+                          assignments[issue.issue_id];
 
-                            <p className="mt-1 max-w-xs text-xs text-gray-500">
-                              {issue.description}
-                            </p>
-                          </td>
+                        const canAssign = [
+                          "reported",
+                          "verified",
+                          "assigned",
+                          "in_progress",
+                        ].includes(issue.status);
 
-                          <td className="px-5 py-4">
-                            <p className="font-medium">
-                              {issue.citizen_name}
-                            </p>
+                        return (
+                          <tr
+                            key={issue.issue_id}
+                            className="hover:bg-gray-50"
+                          >
 
-                            <p className="text-xs text-gray-500">
-                              {issue.citizen_email}
-                            </p>
-                          </td>
+                            <td className="px-5 py-4">
+                              <p className="font-semibold">
+                                #{issue.issue_id} - {issue.title}
+                              </p>
 
-                          <td className="px-5 py-4">
-                            {issue.category_name}
-                          </td>
+                              <p className="mt-1 max-w-xs text-xs text-gray-500">
+                                {issue.description}
+                              </p>
+                            </td>
 
-                          <td className="px-5 py-4">
-                            {issue.location_text}
-                          </td>
+                            <td className="px-5 py-4">
+                              <p className="font-medium">
+                                {issue.citizen_name}
+                              </p>
 
-                          <td className="px-5 py-4 capitalize">
-                            {issue.priority}
-                          </td>
+                              <p className="text-xs text-gray-500">
+                                {issue.citizen_email}
+                              </p>
+                            </td>
 
-                          <td className="px-5 py-4">
-                            <span
-                              className={`inline-block whitespace-nowrap rounded-full px-3 py-1 text-xs font-semibold capitalize ${getStatusStyle(issue.status)}`}
-                            >
-                              {formatStatus(issue.status)}
-                            </span>
-                          </td>
+                            <td className="px-5 py-4">
+                              {issue.category_name}
+                            </td>
 
-                          <td className="whitespace-nowrap px-5 py-4 text-gray-600">
-                            {new Date(
-                              issue.created_at
-                            ).toLocaleDateString()}
-                          </td>
+                            <td className="px-5 py-4">
+                              {issue.location_text}
+                            </td>
 
-                          {/* Status Update Controls */}
-                          <td className="px-5 py-4">
-                            <div className="flex min-w-40 flex-col gap-2">
+                            <td className="px-5 py-4 capitalize">
+                              {issue.priority}
+                            </td>
 
-                              <select
-                                value={
-                                  selectedStatuses[issue.issue_id] ??
-                                  issue.status
-                                }
-                                onChange={(event) =>
-                                  setSelectedStatuses((previous) => ({
-                                    ...previous,
-                                    [issue.issue_id]: event.target.value,
-                                  }))
-                                }
-                                className="rounded-lg border border-gray-300 px-2 py-2"
+                            <td className="px-5 py-4">
+                              <span
+                                className={`inline-block whitespace-nowrap rounded-full px-3 py-1 text-xs font-semibold capitalize ${getStatusStyle(issue.status)}`}
                               >
-                                {availableStatuses.map((status) => (
-                                  <option
-                                    key={status}
-                                    value={status}
+                                {formatStatus(issue.status)}
+                              </span>
+                            </td>
+
+                            <td className="whitespace-nowrap px-5 py-4 text-gray-600">
+                              {new Date(
+                                issue.created_at
+                              ).toLocaleDateString()}
+                            </td>
+
+                            {/* Evidence Images */}
+                            <td className="px-5 py-4">
+                              {evidence.length === 0 ? (
+                                <span className="text-xs text-gray-400">
+                                  No evidence
+                                </span>
+                              ) : (
+                                <div className="flex min-w-32 flex-wrap gap-2">
+                                  {evidence.map((file) => (
+                                    <a
+                                      key={file.fileId}
+                                      href={file.url}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      title={file.fileName}
+                                      className="block"
+                                    >
+                                      <img
+                                        src={file.url}
+                                        alt={file.fileName}
+                                        loading="lazy"
+                                        className="h-16 w-16 rounded-lg border object-cover hover:opacity-80"
+                                      />
+
+                                      <span className="block max-w-20 truncate text-xs text-gray-600">
+                                        {file.fileName}
+                                      </span>
+
+                                      <span className="block text-xs text-gray-400">
+                                        {formatFileSize(file.size)}
+                                      </span>
+                                    </a>
+                                  ))}
+                                </div>
+                              )}
+                            </td>
+
+                            {/* Staff Assignment and Reassignment */}
+                            <td className="min-w-64 px-5 py-4">
+                              {canAssign ? (
+                                <div className="flex min-w-56 flex-col gap-2">
+
+                                  {assignment && (
+                                    <div className="rounded-lg bg-purple-50 p-3 text-xs">
+                                      <p className="font-semibold text-purple-800">
+                                        Currently Assigned
+                                      </p>
+
+                                      <p className="mt-1 font-medium">
+                                        {assignment.staff_name}
+                                      </p>
+
+                                      <p className="text-gray-600">
+                                        {assignment.staff_email}
+                                      </p>
+
+                                      {assignment.notes && (
+                                        <p className="mt-2 text-gray-600">
+                                          Instructions: {assignment.notes}
+                                        </p>
+                                      )}
+                                    </div>
+                                  )}
+
+                                  <label className="text-xs font-semibold text-gray-600">
+                                    {assignment
+                                      ? "Select New Staff Member"
+                                      : "Select Staff Member"}
+                                  </label>
+
+                                  <select
+                                    value={selectedStaff[issue.issue_id] || ""}
+                                    onChange={(event) =>
+                                      setSelectedStaff((previous) => ({
+                                        ...previous,
+                                        [issue.issue_id]: event.target.value,
+                                      }))
+                                    }
+                                    className="rounded-lg border border-gray-300 px-3 py-2"
+                                    disabled={assigningId === issue.issue_id}
                                   >
-                                    {formatStatus(status)}
-                                  </option>
-                                ))}
-                              </select>
+                                    <option value="">
+                                      Select Staff
+                                    </option>
 
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  updateIssueStatus(issue.issue_id)
-                                }
-                                disabled={
-                                  updatingId === issue.issue_id
-                                }
-                                className="rounded-lg bg-green-700 px-3 py-2 font-semibold text-white hover:bg-green-800 disabled:opacity-50"
-                              >
-                                {updatingId === issue.issue_id
-                                  ? "Updating..."
-                                  : "Update"}
-                              </button>
+                                    {staffList.map((staff) => (
+                                      <option
+                                        key={staff.user_id}
+                                        value={staff.user_id}
+                                      >
+                                        {staff.full_name} ({staff.email})
+                                      </option>
+                                    ))}
+                                  </select>
 
-                            </div>
-                          </td>
+                                  <textarea
+                                    value={
+                                      assignmentNotes[issue.issue_id] ??
+                                      assignment?.notes ??
+                                      ""
+                                    }
+                                    onChange={(event) =>
+                                      setAssignmentNotes((previous) => ({
+                                        ...previous,
+                                        [issue.issue_id]: event.target.value,
+                                      }))
+                                    }
+                                    placeholder="Assignment instructions (optional)"
+                                    maxLength={1000}
+                                    rows={2}
+                                    className="rounded-lg border border-gray-300 px-3 py-2"
+                                    disabled={assigningId === issue.issue_id}
+                                  />
 
-                        </tr>
-                      ))}
+                                  <button
+                                    type="button"
+                                    onClick={() => assignIssue(issue.issue_id)}
+                                    disabled={
+                                      assigningId === issue.issue_id ||
+                                      !selectedStaff[issue.issue_id] ||
+                                      Number(selectedStaff[issue.issue_id]) ===
+                                        Number(assignment?.staff_user_id) ||
+                                      staffList.length === 0
+                                    }
+                                    className="rounded-lg bg-blue-700 px-3 py-2 font-semibold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50"
+                                  >
+                                    {assigningId === issue.issue_id
+                                      ? "Saving..."
+                                      : assignment
+                                        ? "Reassign to Staff"
+                                        : "Assign to Staff"}
+                                  </button>
+
+                                  {staffList.length === 0 && (
+                                    <p className="text-xs text-red-600">
+                                      No staff accounts available.
+                                    </p>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-xs text-gray-500">
+                                  Assignment unavailable
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Status Update Controls */}
+                            <td className="px-5 py-4">
+                              <div className="flex min-w-40 flex-col gap-2">
+
+                                <select
+                                  value={
+                                    selectedStatuses[issue.issue_id] ??
+                                    issue.status
+                                  }
+                                  onChange={(event) =>
+                                    setSelectedStatuses((previous) => ({
+                                      ...previous,
+                                      [issue.issue_id]: event.target.value,
+                                    }))
+                                  }
+                                  className="rounded-lg border border-gray-300 px-2 py-2"
+                                >
+                                  {availableStatuses.map((status) => (
+                                    <option
+                                      key={status}
+                                      value={status}
+                                    >
+                                      {formatStatus(status)}
+                                    </option>
+                                  ))}
+                                </select>
+
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    updateIssueStatus(issue.issue_id)
+                                  }
+                                  disabled={
+                                    updatingId === issue.issue_id
+                                  }
+                                  className="rounded-lg bg-green-700 px-3 py-2 font-semibold text-white hover:bg-green-800 disabled:opacity-50"
+                                >
+                                  {updatingId === issue.issue_id
+                                    ? "Updating..."
+                                    : "Update"}
+                                </button>
+
+                              </div>
+                            </td>
+
+                          </tr>
+                        );
+                      })}
 
                     </tbody>
                   </table>
@@ -446,6 +875,123 @@ export default function AdminDashboardClient() {
               )}
 
             </div>
+
+            {/* Staff Management */}
+            <section className="mt-10 rounded-xl border bg-white shadow-sm">
+              <div className="border-b px-6 py-5">
+                <h2 className="text-xl font-bold">Staff Management</h2>
+                <p className="mt-1 text-sm text-gray-500">
+                  Create staff accounts and view the staff members who can receive issue assignments.
+                </p>
+              </div>
+
+              <div className="grid gap-8 p-6 lg:grid-cols-2">
+                <div>
+                  <h3 className="mb-4 font-semibold">Create New Staff Account</h3>
+
+                  <form onSubmit={createStaff} className="space-y-4">
+                    <div>
+                      <label htmlFor="new-staff-name" className="mb-1 block text-sm font-medium text-gray-700">
+                        Full Name
+                      </label>
+                      <input
+                        id="new-staff-name"
+                        type="text"
+                        value={newStaffName}
+                        onChange={(event) => setNewStaffName(event.target.value)}
+                        required
+                        minLength={2}
+                        maxLength={100}
+                        autoComplete="name"
+                        placeholder="Enter staff member's full name"
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="new-staff-email" className="mb-1 block text-sm font-medium text-gray-700">
+                        Email Address
+                      </label>
+                      <input
+                        id="new-staff-email"
+                        type="email"
+                        value={newStaffEmail}
+                        onChange={(event) => setNewStaffEmail(event.target.value)}
+                        required
+                        maxLength={254}
+                        autoComplete="email"
+                        placeholder="staff2@civictrack.com"
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="new-staff-password" className="mb-1 block text-sm font-medium text-gray-700">
+                        Temporary Password
+                      </label>
+                      <input
+                        id="new-staff-password"
+                        type="password"
+                        value={newStaffPassword}
+                        onChange={(event) => setNewStaffPassword(event.target.value)}
+                        required
+                        minLength={8}
+                        autoComplete="new-password"
+                        placeholder="At least 8 characters"
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2"
+                      />
+                    </div>
+
+                    {staffError && (
+                      <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
+                        {staffError}
+                      </p>
+                    )}
+
+                    {staffMessage && (
+                      <p role="status" className="rounded-lg bg-green-50 p-3 text-sm text-green-700">
+                        {staffMessage}
+                      </p>
+                    )}
+
+                    <button
+                      type="submit"
+                      disabled={creatingStaff}
+                      className="rounded-lg bg-green-700 px-5 py-2.5 font-semibold text-white hover:bg-green-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {creatingStaff ? "Creating Account..." : "Create Staff Account"}
+                    </button>
+                  </form>
+                </div>
+
+                <div>
+                  <h3 className="mb-4 font-semibold">
+                    Registered Staff Members ({staffList.length})
+                  </h3>
+
+                  {staffList.length === 0 ? (
+                    <p className="rounded-lg border border-dashed p-5 text-sm text-gray-500">
+                      No staff accounts have been created yet.
+                    </p>
+                  ) : (
+                    <div className="space-y-3">
+                      {staffList.map((staff) => (
+                        <div
+                          key={staff.user_id}
+                          className="rounded-lg border p-4"
+                        >
+                          <p className="font-semibold">{staff.full_name}</p>
+                          <p className="text-sm text-gray-600">{staff.email}</p>
+                          <p className="mt-1 text-xs text-gray-400">
+                            Staff ID: {staff.user_id}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </section>
           </>
         )}
 
